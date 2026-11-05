@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Test-Shim: gdalwarp (Teilmenge) auf Basis von rasterio.
+
+Unterstützt:
+    gdalwarp -overwrite -t_srs EPSG:25832 -te xmin ymin xmax ymax
+             -tr resx resy -r bilinear -dstnodata v -srcnodata v
+             [-cutline mask.geojson] [co-Optionen] src dst
+Cutline: GeoJSON-Feature (Polygon/MultiPolygon in EPSG:25832);
+Pixel außerhalb der Maske werden auf dstnodata gesetzt.
+"""
+import json
+import sys
+
+import numpy as np
+import rasterio
+from rasterio.crs import CRS
+from rasterio.mask import mask
+from rasterio.transform import from_bounds
+from rasterio.warp import reproject, Resampling
+
+
+def parse_args(argv):
+    a = {"co": [], "wo": []}
+    pos = []
+    skip = 0
+    for i, arg in enumerate(argv):
+        if skip > 0:
+            skip -= 1
+            continue
+        if arg == "-t_srs":
+            a["t_srs"] = argv[i + 1]; skip = 1
+        elif arg == "-te":
+            a["te"] = [float(v) for v in argv[i + 1:i + 5]]; skip = 4
+        elif arg == "-tr":
+            a["tr"] = [float(v) for v in argv[i + 1:i + 3]]; skip = 2
+        elif arg == "-r":
+            a["r"] = argv[i + 1]; skip =  1
+        elif arg == "-dstnodata":
+            a["dstnodata"] = float(argv[i + 1]); skip = 1
+        elif arg == "-srcnodata":
+            a["srcnodata"] = float(argv[i + 1]); skip = 1
+        elif arg == "-cutline":
+            a["cutline"] = argv[i + 1]; skip = 1
+        elif arg == "-cwhere":
+            a["cwhere"] = argv[i + 1]; skip = 1
+        elif arg == "-co":
+            a["co"].append(argv[i + 1]); skip = 1
+        elif arg == "-wo":
+            a["wo"].append(argv[i + 1]); skip = 1
+        elif arg in ("-multi", "-overwrite"):
+            pass
+        else:
+            pos.append(arg)
+    a["src"], a["dst"] = pos[0], pos[1]
+    return a
+
+
+def main(argv):
+    a = parse_args(argv)
+    with rasterio.open(a["src"]) as src:
+        src_crs = src.crs
+        src_nodata = a.get("srcnodata", src.nodata)
+        src_band = src.read(1).astype(np.float32)
+        if src_nodata is not None:
+            src_band = np.where(src_band == src_nodata, np.nan, src_band)
+        dst_crs = CRS.from_string(a.get("t_srs", src_crs.to_string()))
+        xmin, ymin, xmax, ymax = a["te"]
+        resx, resy = a["tr"]
+        width = int(round((xmax - xmin) / resx))
+        height = int(round((ymax - ymin) / resy))
+        dst = np.full((height, width), np.nan, dtype=np.float32)
+        reproject(
+            source=src_band,
+            destination=dst,
+            src_transform=src.transform,
+            src_crs=src_crs,
+            dst_transform=from_bounds(xmin, ymin, xmax, ymax, width, height),
+            dst_crs=dst_crs,
+            resampling=Resampling.bilinear,
+            src_nodata=np.nan,
+            dst_nodata=np.nan,
+        )
+        nodata = a.get("dstnodata", -99999.0)
+        if "cutline" in a:
+            with open(a["cutline"]) as fh:
+                gj = json.load(fh)
+            feats = gj["features"]
+            if "cwhere" in a:
+                expr = a["cwhere"]
+                feld, wert = expr.split("=", 1)
+                feld = feld.strip()
+                wert = wert.strip().strip("'").strip('"')
+                feats = [f for f in feats
+                         if str((f.get("properties") or {}).get(feld)) == wert]
+            geoms = [f["geometry"] for f in feats]
+            with rasterio.MemoryFile().open(
+                driver="GTiff", width=width, height=height,
+                count=1, dtype="float32",
+                transform=from_bounds(xmin, ymin, xmax, ymax, width, height),
+                crs=dst_crs, nodata=nodata,
+            ) as mem:
+                mem.write(np.where(np.isnan(dst), nodata, dst), 1)
+                out, _ = mask(mem, geoms, crop=False, nodata=nodata, filled=True)
+                dst = out[0].astype(np.float32)
+                dst = np.where(dst == nodata, np.nan, dst)
+        profile = {
+            "driver": "GTiff", "width": width, "height": height,
+            "count": 1, "dtype": "float32",
+            "transform": from_bounds(xmin, ymin, xmax, ymax, width, height),
+            "crs": dst_crs, "nodata": nodata, "compress": "deflate", "tiled": True,
+        }
+        with rasterio.open(a["dst"], "w", **profile) as out_ds:
+            out_ds.write(np.where(np.isnan(dst), nodata, dst).astype(np.float32), 1)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

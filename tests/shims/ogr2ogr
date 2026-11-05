@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Test-Shim: ogr2ogr (Teilmenge) auf Basis von Fiona/GeoJSON.
+
+Unterstützt:
+    ogr2ogr -f GeoJSON [-t_srs EPSG:25832] dst src
+    ogr2ogr -f CSV dst src <layer> -sql "SELECT DISTINCT feld AS v FROM lyr"
+"""
+import csv
+import json
+import os
+import sys
+
+import rasterio.crs
+from rasterio.warp import transform as rio_transform
+
+
+def main(argv):
+    fmt = None
+    t_srs = None
+    sql = None
+    pos = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "-f":
+            fmt = argv[i + 1]; i += 2
+        elif a == "-t_srs":
+            t_srs = argv[i + 1]; i += 2
+        elif a == "-sql":
+            sql = argv[i + 1]; i += 2
+        elif a.startswith("-"):
+            i += 1
+        else:
+            pos.append(a); i += 1
+    dst, src = pos[0], pos[1]
+
+    if fmt == "ESRI Shapefile" and src.lower().endswith(".csv"):
+        # CSV -> Punkt-Shapefile (Stub fuer Tests: echte Geometrie macht GDAL)
+        rows = []
+        with open(src, newline="", encoding="utf-8") as fh:
+            for r in csv.DictReader(fh):
+                rows.append(r)
+        base = dst[:-4] if dst.lower().endswith(".shp") else dst
+        for ext in (".shp", ".shx", ".dbf"):
+            with open(base + ext, "wb") as f:
+                f.write(b"")
+        with open(base + ".prj", "w") as f:
+            f.write('PROJCS["ETRS89 / UTM zone 32N"]')
+        return 0
+
+    with open(src) as fh:
+        gj = json.load(fh)
+    features = gj.get("features", [])
+    crs = gj.get("crs", {})
+
+    if fmt == "GeoJSON":
+        if t_srs:
+            src_crs_name = crs.get("properties", {}).get("name", "")
+            src_epsg = 25832 if "25832" in src_crs_name else 4258
+            for feat in features:
+                geom = feat["geometry"]
+                if geom["type"] in ("Polygon", "MultiPolygon"):
+                    _reproject_geom(geom, src_epsg, 25832)
+        os.makedirs(os.path.dirname(os.path.abspath(dst)) or ".", exist_ok=True)
+        with open(dst, "w", encoding="utf-8") as fh:
+            json.dump({
+                "type": "FeatureCollection",
+                "crs": {"type": "name",
+                         "properties": {"name": "urn:ogc:def:crs:EPSG::25832"}},
+                "features": features,
+            }, fh)
+        return 0
+
+
+    if fmt == "CSV" and sql and "DISTINCT" in sql.upper():
+        import re as _re
+        m = _re.search(r"SELECT\s+DISTINCT\s+(\w+)\s+AS\s+\w+\s+FROM\s+\"?([\w]+)\"?",
+                       sql, _re.IGNORECASE)
+        if not m:
+            sys.stderr.write(f"Shim ogr2ogr: SQL nicht unterstützt: {sql}\n")
+            return 1
+        feld = m.group(1)
+        seen = []
+        for feat in features:
+            v = (feat.get("properties") or {}).get(feld)
+            if v is not None and str(v) not in seen:
+                seen.append(str(v))
+        with open(dst, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["v"])
+            for v in seen:
+                w.writerow([v])
+        return 0
+
+    sys.stderr.write(f"Shim ogr2ogr: Argumente nicht unterstützt: {argv}\n")
+    return 1
+
+
+def _reproject_geom(geom, src_epsg, dst_epsg):
+    def walk(coords):
+        if isinstance(coords[0], (int, float)):
+            return coords
+        return [walk(c) for c in coords]
+
+    def transform_ring(ring):
+        xs = [p[0] for p in ring]
+        ys = [p[1] for p in ring]
+        tx, ty = rio_transform(
+            rasterio.crs.CRS.from_epsg(src_epsg),
+            rasterio.crs.CRS.from_epsg(dst_epsg),
+            xs, ys,
+        )
+        return [[x, y] for x, y in zip(tx, ty)]
+
+    def walk_transform(coords):
+        if isinstance(coords[0], (int, float)):
+            return coords
+        if isinstance(coords[0][0], (int, float)):
+            return transform_ring(coords)
+        return [walk_transform(c) for c in coords]
+
+    if geom["type"] == "Polygon":
+        geom["coordinates"] = [walk_transform(r) for r in geom["coordinates"]]
+    elif geom["type"] == "MultiPolygon":
+        geom["coordinates"] = [[walk_transform(r) for r in poly]
+                               for poly in geom["coordinates"]]
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

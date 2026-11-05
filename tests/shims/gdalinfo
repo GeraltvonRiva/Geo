@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Test-Shim: gdalinfo (JSON) auf Basis von rasterio (GDAL-Bindings).
+
+Bildet die von gw.gdalcmd genutzte CLI-Schnittstelle nach:
+    gdalinfo -json <file> -> {geoTransform, size, ...}
+Wird nur für die Sandbox-Tests verwendet (kein echtes gdal-bin verfügbar);
+im Produktiveinsatz ersetzt gdal-bin diesen Shim vollständig.
+"""
+import json
+import sys
+
+import rasterio
+
+
+def main(argv):
+    if "-json" in argv:
+        paths = [a for a in argv if not a.startswith("-")]
+    else:
+        paths = [a for a in argv if not a.startswith("-")]
+    out = {}
+    with rasterio.open(paths[0]) as ds:
+        gt = [ds.transform.c, ds.transform.a, ds.transform.b,
+              ds.transform.f, ds.transform.d, ds.transform.e]
+        out["geoTransform"] = gt
+        out["size"] = [ds.width, ds.height]
+        out["driver"] = ds.driver
+    print(json.dumps(out))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

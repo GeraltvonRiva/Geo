@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Test-Shim: gdal_rasterize (Teilmenge) auf Basis von rasterio.features.
+
+Unterstützt:
+    gdal_rasterize -at -burn 1 -init 0 -where "ags='05'"
+                    -te xmin ymin xmax ymax -tr 1000 1000 -ot Byte
+                    src.geojson dst.tif
+Rasterisiert alle Features, die das -where-Filterkriterium erfüllen,
+mit ALL_TOUCHED auf das Zielraster.
+"""
+import json
+import os
+import sys
+
+import numpy as np
+import rasterio
+from rasterio.features import rasterize
+from rasterio.transform import from_bounds
+
+
+def parse_where(expr):
+    """Extrahiert (feld, wert) aus "feld='wert'" (einfaches Format)."""
+    if not expr:
+        return None, None
+    if "=" in expr:
+        f, v = expr.split("=", 1)
+        return f.strip(), v.strip().strip("'").strip('"')
+    return None, None
+
+
+def main(argv):
+    opts = {"burn": 1, "init": 0, "where": None, "at": False}
+    te = tr = None
+    pos = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "-at":
+            opts["at"] = True; i += 1
+        elif a == "-burn":
+            opts["burn"] = float(argv[i + 1]); i += 2
+        elif a == "-init":
+            opts["init"] = float(argv[i + 1]); i += 2
+        elif a == "-where":
+            opts["where"] = argv[i + 1]; i += 2
+        elif a == "-te":
+            te = [float(v) for v in argv[i + 1:i + 5]]; i += 5
+        elif a == "-tr":
+            tr = [float(v) for v in argv[i + 1:i + 3]]; i += 3
+        elif a == "-ot":
+            i += 2
+        elif a.startswith("-"):
+            i += 1
+        else:
+            pos.append(a); i += 1
+    src, dst = pos[0], pos[1]
+    feld, wert = parse_where(opts["where"])
+
+    with open(src) as fh:
+        gj = json.load(fh)
+    geoms = []
+    for feat in gj.get("features", []):
+        props = feat.get("properties", {}) or {}
+        if feld is not None and str(props.get(feld)) != str(wert):
+            continue
+        geoms.append(feat["geometry"])
+
+    xmin, ymin, xmax, ymax = te
+    resx, resy = tr
+    width = int(round((xmax - xmin) / resx))
+    height = int(round((ymax - ymin) / resy))
+    arr = np.full((height, width), opts["init"], dtype="uint8")
+    if geoms:
+        out = rasterize(
+            geoms,
+            out_shape=(height, width),
+            transform=from_bounds(xmin, ymin, xmax, ymax, width, height),
+            fill=opts["init"],
+            default_value=opts["burn"],
+            all_touched=opts["at"],
+            dtype="uint8",
+        )
+        arr = out.astype("uint8")
+    os.makedirs(os.path.dirname(os.path.abspath(dst)) or ".", exist_ok=True)
+    profile = {
+        "driver": "GTiff", "width": width, "height": height, "count": 1,
+        "dtype": "uint8",
+        "transform": from_bounds(xmin, ymin, xmax, ymax, width, height),
+        "crs": rasterio.crs.CRS.from_epsg(25832), "nodata": None,
+    }
+    with rasterio.open(dst, "w", **profile) as out_ds:
+        out_ds.write(arr, 1)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

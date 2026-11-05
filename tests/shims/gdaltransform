@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Test-Shim: gdaltransform (Teilmenge) auf Basis von rasterio/pyproj-freier
+Implementierung – nutzt das im rasterio gebündelte PROJ nicht direkt,
+sondern bildet die CLI-Schnittstelle nach:
+    gdaltransform -s_srs EPSG:... -t_srs EPSG:...  (stdin: "x y" je Zeile)
+"""
+import sys
+
+import rasterio.crs
+from rasterio.warp import transform as rio_transform
+
+
+def main(argv):
+    s_srs = t_srs = None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "-s_srs":
+            s_srs = argv[i + 1]; i += 2
+        elif argv[i] == "-t_srs":
+            t_srs = argv[i + 1]; i += 2
+        else:
+            i += 1
+    data = sys.stdin.read().strip().splitlines()
+    xs, ys = [], []
+    for line in data:
+        parts = line.replace(",", " ").split()
+        if len(parts) >= 2:
+            xs.append(float(parts[0]))
+            ys.append(float(parts[1]))
+    if s_srs and t_srs:
+        tx, ty = rio_transform(
+            rasterio.crs.CRS.from_string(s_srs),
+            rasterio.crs.CRS.from_string(t_srs),
+            xs, ys,
+        )
+    else:
+        tx, ty = xs, ys
+    for x, y in zip(tx, ty):
+        print(f"{x} {y}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

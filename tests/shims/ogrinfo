@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""Test-Shim: ogrinfo (Teilmenge) auf Basis von GeoJSON-Standardbibliothek.
+
+Unterstützt:
+    ogrinfo -ro -so -al <file>   ->  Layername + Extent (simuliertes Format)
+"""
+import json
+import sys
+
+
+def main(argv):
+    pos = [a for a in argv if not a.startswith("-")]
+    src = pos[0]
+    with open(src) as fh:
+        gj = json.load(fh)
+    xs, ys = [], []
+    for feat in gj.get("features", []):
+        geom = feat["geometry"]
+        _collect(geom["coordinates"], xs, ys)
+    layer = "vg25_layer"
+    print(f"Layer name: {layer}")
+    print(f"Geometry: Polygon")
+    if xs:
+        print(f"Extent: ({min(xs):.15f}, {min(ys):.15f}) - "
+              f"({max(xs):.15f}, {max(ys):.15f})")
+    return 0
+
+
+def _collect(coords, xs, ys):
+    if isinstance(coords, (list, tuple)):
+        if coords and isinstance(coords[0], (int, float)):
+            xs.append(coords[0])
+            ys.append(coords[1])
+        else:
+            for c in coords:
+                _collect(c, xs, ys)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
